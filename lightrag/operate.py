@@ -1,3 +1,5 @@
+# 本模块实现 LightRAG 的抽取与检索操作，并在真实 chunk 完成点输出 monitor 事件。
+# 结构化事件通过独立 logger 发送，不改变 LightRAG 原有日志格式。
 from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import partial
@@ -109,6 +111,25 @@ from dotenv import load_dotenv
 # allows to use different .env file for each lightrag instance
 # the OS environment variables take precedence over the .env file
 load_dotenv(dotenv_path=Path(__file__).resolve().parent / ".env", override=False)
+
+
+def _emit_monitor_progress(stage: str, status: str, current: int, total: int) -> None:
+    """向 DataWeaver 专用 logger 输出 LightRAG 的 chunk 进度。"""
+    logging.getLogger("dataweaver.progress").info(
+        "baseline progress",
+        extra={
+            "progress_event": {
+                "schema_version": 1,
+                "stage": stage,
+                "native_stage": stage,
+                "status": status,
+                "current": current,
+                "total": total,
+                "unit": "chunks",
+                "message": f"{stage} {current}/{total} chunks",
+            }
+        },
+    )
 
 
 class QueryProgress:
@@ -4090,9 +4111,12 @@ async def extract_entities(
 
     processed_chunks = 0
     total_chunks = len(ordered_chunks)
+    _emit_monitor_progress("graph_extract", "running", 0, total_chunks)
 
     async def _process_single_content(chunk_key_dp: tuple[str, TextChunkSchema]):
         """Process a single chunk
+
+        以中文说明：处理完成后报告累计的真实 chunk 进度。
         Args:
             chunk_key_dp (tuple[str, TextChunkSchema]):
                 ("chunk-xxxxxx", {"tokens": int, "content": str, "full_doc_id": str, "chunk_order_index": int})
@@ -4490,6 +4514,7 @@ async def extract_entities(
                     )
 
         processed_chunks += 1
+        _emit_monitor_progress("graph_extract", "running", processed_chunks, total_chunks)
         entities_count = len(maybe_nodes)
         relations_count = len(maybe_edges)
         log_message = f"Chunk {processed_chunks} of {total_chunks} extracted {entities_count} Ent + {relations_count} Rel {chunk_key}"
@@ -4634,6 +4659,7 @@ async def extract_entities(
             )
             raise prefixed_exception from first_exception
     finally:
+        # 无论结果如何，最终阶段状态由 worker 的进程结果收尾。
         # On EVERY exit — mirrors merge_nodes_and_edges. The success and
         # failure paths used to publish explicitly, but an external
         # cancellation landing on the asyncio.wait above bypassed both,
@@ -4644,6 +4670,7 @@ async def extract_entities(
         _publish_cache_skip_summary()
 
     # If all tasks completed successfully, chunk_results already contains the results
+    _emit_monitor_progress("graph_extract", "completed", total_chunks, total_chunks)
     # Return the chunk_results for later processing in merge_nodes_and_edges
     return chunk_results
 
